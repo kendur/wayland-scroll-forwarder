@@ -132,7 +132,7 @@ def validate_device_path(path: str) -> Path:
         raise ValueError("device must resolve to /dev/input/eventN")
     if not stat.S_ISCHR(mode):
         raise ValueError(f"{resolved} is not a character device")
-    return requested
+    return resolved
 
 
 def open_wheel_device(path: Path) -> InputDevice:
