@@ -23,13 +23,27 @@ a larger attack surface than a device ACL.
 
 ## Dependencies
 
+Running the self-contained build (`./build.sh`, see below) needs nothing beyond
+glibc, udev and Xwayland. Running the plain script needs:
+
 - Python 3
 - `python-evdev`
 - `python-xlib`
-- `libXtst`
 
 Fedora/Bazzite currently provides the required Python modules on the host. Other
 distributions can use their native packages listed by the upstream project.
+
+## Self-contained build
+
+```bash
+./build.sh          # -> dist/wayland-scroll-forwarder (PyInstaller, ~11 MB)
+```
+
+The build virtualenv inherits the host's `python3-evdev` / `python3-xlib`
+(Fedora Atomic ships no Python headers, so `pip` cannot compile evdev) and
+PyInstaller bundles them. The installer below prefers `dist/` when it exists, so
+the user service no longer depends on host Python modules surviving an image
+update.
 
 ## Usage
 
@@ -70,6 +84,8 @@ after rebooting or reconnecting a Bluetooth mouse. The included installer create
 - a udev rule matching the exact kernel device name and mouse interface
 - the stable symlink `/dev/input/wayland-scroll-forwarder-mouse`
 - a `uaccess` grant for the active desktop user only
+- a system one-shot service that refreshes input-device rules after udev and
+  Bluetooth start during boot
 - a persistent user service that waits quietly while the mouse is absent and
   resumes automatically after it reconnects
 
@@ -77,11 +93,15 @@ First identify the exact mouse name with `--list-devices`, then install. For exa
 
 ```bash
 sudo ./scroll_forwarder.py --list-devices
+./build.sh
 ./install-persistent.sh "Naga V2 Pro Mouse"
 ```
 
-The authentication dialog covers only installation/reloading of the udev rule.
-The forwarder itself runs as the desktop user. Check or stop it with:
+A single authentication dialog covers the udev rule, the boot-refresh service
+and the udev reload; everything else runs as the desktop user. Re-running the
+installer after a rebuild (`./install-persistent.sh`, the device name is read
+from the installed rule) shows no dialog at all when the system files are
+already correct. Check or stop the forwarder with:
 
 ```bash
 systemctl --user status wayland-scroll-forwarder
@@ -94,8 +114,10 @@ Disable persistent startup with:
 systemctl --user disable --now wayland-scroll-forwarder
 ```
 
-To remove the system rule as well, delete
-`/etc/udev/rules.d/70-wayland-scroll-forwarder.rules` as root and reload udev.
+To remove the system setup as well, disable and delete
+`wayland-scroll-forwarder-udev-refresh.service`, delete
+`/etc/udev/rules.d/70-wayland-scroll-forwarder.rules`, then reload systemd and
+udev.
 
 For completely unprivileged operation, grant the active desktop user a device ACL
 (temporary until reconnect/reboot):

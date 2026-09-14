@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh input-device rules for Wayland scroll forwarder
+After=systemd-udev-trigger.service bluetooth.service
+Wants=bluetooth.service
+Before=graphical.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/udevadm trigger --subsystem-match=input --action=add
+
+[Install]
+WantedBy=graphical.target
