@@ -3,6 +3,7 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly RULE_TARGET="/etc/udev/rules.d/70-wayland-scroll-forwarder.rules"
+readonly REFRESH_SERVICE_TARGET="/etc/systemd/system/wayland-scroll-forwarder-udev-refresh.service"
 readonly SERVICE_TARGET="${HOME}/.config/systemd/user/wayland-scroll-forwarder.service"
 
 usage() {
@@ -47,8 +48,13 @@ printf 'Authentication is required to install the narrowly scoped udev rule.\n'
 pkexec install -Dm644 \
   "${TEMP_DIR}/70-wayland-scroll-forwarder.rules" \
   "${RULE_TARGET}"
+pkexec install -Dm644 \
+  "${SCRIPT_DIR}/config/wayland-scroll-forwarder-udev-refresh.service" \
+  "${REFRESH_SERVICE_TARGET}"
 pkexec udevadm control --reload-rules
 pkexec udevadm trigger --subsystem-match=input --action=add
+pkexec systemctl daemon-reload
+pkexec systemctl enable wayland-scroll-forwarder-udev-refresh.service
 
 systemctl --user stop wayland-scroll-forwarder.service 2>/dev/null || true
 systemctl --user daemon-reload
@@ -57,3 +63,4 @@ systemctl --user enable --now wayland-scroll-forwarder.service
 printf '\nInstalled persistent forwarder for: %s\n' "${DEVICE_NAME}"
 printf 'Stable device: /dev/input/wayland-scroll-forwarder-mouse\n'
 printf 'Service: wayland-scroll-forwarder.service\n'
+printf 'Boot refresh: wayland-scroll-forwarder-udev-refresh.service\n'

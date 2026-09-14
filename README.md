@@ -70,6 +70,8 @@ after rebooting or reconnecting a Bluetooth mouse. The included installer create
 - a udev rule matching the exact kernel device name and mouse interface
 - the stable symlink `/dev/input/wayland-scroll-forwarder-mouse`
 - a `uaccess` grant for the active desktop user only
+- a system one-shot service that refreshes input-device rules after udev and
+  Bluetooth start during boot
 - a persistent user service that waits quietly while the mouse is absent and
   resumes automatically after it reconnects
 
@@ -94,8 +96,10 @@ Disable persistent startup with:
 systemctl --user disable --now wayland-scroll-forwarder
 ```
 
-To remove the system rule as well, delete
-`/etc/udev/rules.d/70-wayland-scroll-forwarder.rules` as root and reload udev.
+To remove the system setup as well, disable and delete
+`wayland-scroll-forwarder-udev-refresh.service`, delete
+`/etc/udev/rules.d/70-wayland-scroll-forwarder.rules`, then reload systemd and
+udev.
 
 For completely unprivileged operation, grant the active desktop user a device ACL
 (temporary until reconnect/reboot):
