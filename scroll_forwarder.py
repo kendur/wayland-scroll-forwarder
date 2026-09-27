@@ -21,13 +21,52 @@ from pathlib import Path
 
 import evdev
 from evdev import InputDevice, ecodes
-from Xlib import X, display, error
+from Xlib import X, display, error, xauth
 from Xlib.ext import xtest
 
 
 LOG = logging.getLogger("wayland-scroll-forwarder")
 HI_RES_UNITS_PER_STEP = 120
 MAX_STEPS_PER_REPORT = 32
+XAUTH_FAMILY_WILD = 0xFFFF
+
+
+def _tolerant_get_best_auth(original):
+    """Wrap Xauthority.get_best_auth so a hostname change does not lock us out.
+
+    python-xlib looks up local cookies by the *current* hostname only.  If the
+    hostname changes after the session starts (DHCP-assigned names, for
+    example) the exact lookup fails even though libX11 clients still connect
+    fine via the FamilyWild entry.  Fall back to a wildcard entry, then to any
+    local entry for the same display number: the X server validates the cookie,
+    not the hostname, on a Unix socket.
+    """
+
+    def get_best_auth(self, family, address, dispno, types=(b"MIT-MAGIC-COOKIE-1",)):
+        try:
+            return original(self, family, address, dispno, types)
+        except error.XNoAuthError:
+            if family != xauth.FamilyLocal:
+                raise
+        num = str(dispno).encode()
+        for wanted_family in (XAUTH_FAMILY_WILD, xauth.FamilyLocal):
+            for efam, _eaddr, enum, ename, edata in self.entries:
+                if efam == wanted_family and enum in (b"", num) and ename in types:
+                    LOG.warning(
+                        "No X authority cookie for hostname %r; using %s entry for display %s",
+                        address,
+                        "wildcard" if wanted_family == XAUTH_FAMILY_WILD else "another host's",
+                        dispno,
+                    )
+                    return (ename, edata)
+        raise error.XNoAuthError((family, address, dispno))
+
+    return get_best_auth
+
+
+if not getattr(xauth.Xauthority.get_best_auth, "_hostname_tolerant", False):
+    xauth.Xauthority.get_best_auth = _tolerant_get_best_auth(xauth.Xauthority.get_best_auth)
+    xauth.Xauthority.get_best_auth._hostname_tolerant = True
 
 
 @dataclass

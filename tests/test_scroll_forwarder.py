@@ -42,3 +42,62 @@ class ArgumentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class XauthFallbackTests(unittest.TestCase):
+    COOKIE = b"\x01\x02\x03"
+
+    def _authority(self, entries):
+        from Xlib import xauth
+
+        authority = xauth.Xauthority.__new__(xauth.Xauthority)
+        authority.entries = entries
+        return authority
+
+    def test_exact_hostname_match_still_preferred(self):
+        from Xlib import xauth
+
+        authority = self._authority(
+            [
+                (0xFFFF, b"", b"0", b"MIT-MAGIC-COOKIE-1", b"wild"),
+                (xauth.FamilyLocal, b"bazzite", b"0", b"MIT-MAGIC-COOKIE-1", self.COOKIE),
+            ]
+        )
+        self.assertEqual(
+            authority.get_best_auth(xauth.FamilyLocal, b"bazzite", 0),
+            (b"MIT-MAGIC-COOKIE-1", self.COOKIE),
+        )
+
+    def test_hostname_change_falls_back_to_wildcard(self):
+        from Xlib import xauth
+
+        authority = self._authority(
+            [
+                (xauth.FamilyLocal, b"bazzite", b"0", b"MIT-MAGIC-COOKIE-1", b"local"),
+                (0xFFFF, b"", b"0", b"MIT-MAGIC-COOKIE-1", self.COOKIE),
+            ]
+        )
+        self.assertEqual(
+            authority.get_best_auth(xauth.FamilyLocal, b"803f5dd87f08", 0),
+            (b"MIT-MAGIC-COOKIE-1", self.COOKIE),
+        )
+
+    def test_hostname_change_falls_back_to_other_local_entry(self):
+        from Xlib import xauth
+
+        authority = self._authority(
+            [(xauth.FamilyLocal, b"bazzite", b"0", b"MIT-MAGIC-COOKIE-1", self.COOKIE)]
+        )
+        self.assertEqual(
+            authority.get_best_auth(xauth.FamilyLocal, b"803f5dd87f08", 0),
+            (b"MIT-MAGIC-COOKIE-1", self.COOKIE),
+        )
+
+    def test_other_display_number_is_not_used(self):
+        from Xlib import error, xauth
+
+        authority = self._authority(
+            [(xauth.FamilyLocal, b"bazzite", b"1", b"MIT-MAGIC-COOKIE-1", self.COOKIE)]
+        )
+        with self.assertRaises(error.XNoAuthError):
+            authority.get_best_auth(xauth.FamilyLocal, b"803f5dd87f08", 0)
