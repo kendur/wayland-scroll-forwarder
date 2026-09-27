@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Forward physical wheel events to a focused Xwayland window.
 
-Only an explicitly selected input device is opened.  When started through sudo,
-the device is opened first and all supplementary groups and root privileges are
-dropped before connecting to X11 or entering the event loop.
+Only explicitly selected input devices are opened: either paths given with
+--device, or the udev-managed symlinks inside --device-dir.  Devices may come
+and go while running (wireless mice sleeping, receivers being unplugged); the
+set is re-scanned instead of exiting, so scrolling keeps working when the user
+switches between mice mid-session.  When started through sudo, the devices are
+opened first and all supplementary groups and root privileges are dropped
+before connecting to X11 or entering the event loop.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from Xlib.ext import xtest
 
 
 LOG = logging.getLogger("wayland-scroll-forwarder")
+DEVICE_DIR_DEFAULT = Path("/dev/input/wsf")
 HI_RES_UNITS_PER_STEP = 120
 MAX_STEPS_PER_REPORT = 32
 XAUTH_FAMILY_WILD = 0xFFFF
@@ -103,7 +108,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         description="Forward wheel events from one input device to a focused X11/Xwayland window."
     )
     parser.add_argument("window_class", nargs="?", help="exact WM_CLASS value (for GFN: GeForceNOW)")
-    parser.add_argument("--device", metavar="PATH", help="one /dev/input/eventN or /dev/input/by-id path")
+    parser.add_argument(
+        "--device",
+        metavar="PATH",
+        action="append",
+        help="a /dev/input/eventN or /dev/input/by-id path; repeat to monitor several devices",
+    )
+    parser.add_argument(
+        "--device-dir",
+        metavar="DIR",
+        help="directory of udev-managed device symlinks to monitor as a set (e.g. /dev/input/wsf)",
+    )
     parser.add_argument("--list-devices", action="store_true", help="list wheel-capable readable devices and exit")
     parser.add_argument(
         "--allow-unfocused",
@@ -147,7 +162,7 @@ def list_devices() -> int:
 
 def stable_device_links(event_path: Path) -> list[str]:
     links: list[str] = []
-    for directory in (Path("/dev/input/by-id"), Path("/dev/input/by-path")):
+    for directory in (DEVICE_DIR_DEFAULT, Path("/dev/input/by-id"), Path("/dev/input/by-path")):
         try:
             for candidate in directory.iterdir():
                 try:
@@ -189,17 +204,89 @@ def open_wheel_device(path: Path) -> InputDevice:
     return device
 
 
-def wait_for_wheel_device(path_text: str) -> InputDevice:
-    """Wait indefinitely for a configured stable device link to become usable."""
-    logged = False
-    while True:
+class WheelDeviceSet:
+    """The configured wheel devices, re-scanned as they come and go.
+
+    Only configured devices are ever opened: the explicit paths passed with
+    --device, plus whatever udev has linked into --device-dir (one entry per
+    mouse the rule matched by exact name).  A device that disconnects is
+    dropped and retried, so a sleeping wireless mouse or a mid-session switch
+    to a different mouse no longer ends the process.
+    """
+
+    RETRY_INTERVAL = 2.0
+
+    def __init__(self, paths: list[str] | None = None, directory: str | None = None) -> None:
+        self.paths = list(paths or [])
+        self.directory = Path(directory) if directory else None
+        self.open_devices: dict[str, InputDevice] = {}
+        self._next_scan = 0.0
+        self._reported: set[str] = set()
+
+    def candidates(self) -> list[str]:
+        """Configured paths first, then the current contents of the device dir."""
+        found = list(self.paths)
+        if self.directory:
+            try:
+                entries = sorted(self.directory.iterdir())
+            except OSError:
+                entries = []
+            found.extend(str(entry) for entry in entries)
+        seen: dict[str, None] = {}
+        for text in found:
+            seen.setdefault(text, None)
+        return list(seen)
+
+    def scan(self, *, force: bool = False) -> list[tuple[str, InputDevice]]:
+        """Open any configured device that is not open yet; return the new ones."""
+        now = time.monotonic()
+        if not force and now < self._next_scan:
+            return []
+        self._next_scan = now + self.RETRY_INTERVAL
+        opened: list[tuple[str, InputDevice]] = []
+        for text in self.candidates():
+            if text in self.open_devices:
+                continue
+            try:
+                device = open_wheel_device(validate_device_path(text))
+            except (ValueError, PermissionError, OSError) as exc:
+                if text not in self._reported:
+                    LOG.info("Waiting for input device %s (%s)", text, exc)
+                    self._reported.add(text)
+                continue
+            self._reported.discard(text)
+            self.open_devices[text] = device
+            opened.append((text, device))
+            LOG.info("Monitoring %s (%s)", device.path, device.name)
+        return opened
+
+    def drop(self, text: str) -> None:
+        device = self.open_devices.pop(text, None)
+        if device is None:
+            return
+        LOG.warning("Input device %s (%s) disconnected", device.path, device.name)
         try:
-            return open_wheel_device(validate_device_path(path_text))
-        except (ValueError, PermissionError, OSError) as exc:
-            if not logged:
-                LOG.info("Waiting for input device %s (%s)", path_text, exc)
-                logged = True
-            time.sleep(2)
+            device.close()
+        except OSError:
+            pass
+        # Retry promptly: a mouse that just woke up should be picked straight up.
+        self._next_scan = 0.0
+
+    def wait_for_any(self) -> None:
+        """Block until at least one configured device is usable."""
+        while not self.open_devices:
+            self.scan(force=True)
+            if self.open_devices:
+                return
+            time.sleep(self.RETRY_INTERVAL)
+
+    def close_all(self) -> None:
+        for text in list(self.open_devices):
+            device = self.open_devices.pop(text)
+            try:
+                device.close()
+            except OSError:
+                pass
 
 
 def drop_sudo_privileges() -> None:
@@ -225,10 +312,11 @@ def drop_sudo_privileges() -> None:
 
 
 class ScrollForwarder:
-    def __init__(self, target_class: str, device: InputDevice, *, allow_unfocused: bool = False) -> None:
+    def __init__(self, target_class: str, devices: WheelDeviceSet, *, allow_unfocused: bool = False) -> None:
         self.target_class = target_class.casefold()
-        self.device = device
-        self.normalizer = WheelNormalizer()
+        self.devices = devices
+        # Hi-res remainders are per device: two mice must not pool fractions.
+        self.normalizers: dict[str, WheelNormalizer] = {}
         self.allow_unfocused = allow_unfocused
         self.display = display.Display()
         self.root = self.display.screen().root
@@ -321,7 +409,7 @@ class ScrollForwarder:
             xtest.fake_input(self.display, X.ButtonRelease, button)
         self.display.sync()
 
-    def process_report(self, report: list) -> None:
+    def process_report(self, report: list, source: str = "") -> None:
         frames = {"vertical": AxisFrame(), "horizontal": AxisFrame()}
         mappings = {
             ecodes.REL_WHEEL: ("vertical", "legacy"),
@@ -345,34 +433,66 @@ class ScrollForwarder:
             return
         if not self.allow_unfocused and not self.target_is_focused():
             return
+        normalizer = self.normalizers.setdefault(source, WheelNormalizer())
         for axis, frame in frames.items():
-            steps = self.normalizer.steps(axis, frame)
+            steps = normalizer.steps(axis, frame)
             if steps:
                 LOG.debug("Forwarding %s wheel steps: %d", axis, steps)
                 self.inject_steps(axis, steps)
 
     def run(self) -> int:
         poller = select.poll()
-        poller.register(self.device.fileno(), select.POLLIN | select.POLLERR | select.POLLHUP)
-        report: list = []
+        watched: dict[int, tuple[str, InputDevice]] = {}
+        reports: dict[int, list] = {}
+
+        def watch(new_devices: list[tuple[str, InputDevice]]) -> None:
+            for text, device in new_devices:
+                fileno = device.fileno()
+                poller.register(fileno, select.POLLIN | select.POLLERR | select.POLLHUP)
+                watched[fileno] = (text, device)
+                reports[fileno] = []
+
+        def unwatch(fileno: int) -> None:
+            text, _ = watched.pop(fileno, ("", None))
+            reports.pop(fileno, None)
+            try:
+                poller.unregister(fileno)
+            except KeyError:
+                pass
+            if text:
+                self.devices.drop(text)
+
+        watch(list(self.devices.open_devices.items()))
         had_target = self.target_window is not None
-        LOG.info("Monitoring only %s (%s); press Ctrl+C to stop", self.device.path, self.device.name)
+        LOG.info("Press Ctrl+C to stop")
         try:
             while True:
-                for _, flags in poller.poll(500):
+                for fileno, flags in poller.poll(500):
+                    entry = watched.get(fileno)
+                    if entry is None:
+                        continue
+                    text, device = entry
                     if flags & (select.POLLERR | select.POLLHUP):
-                        LOG.error("Input device disconnected")
-                        return 1
+                        unwatch(fileno)
+                        continue
                     try:
-                        events = self.device.read()
+                        events = device.read()
                     except BlockingIOError:
                         continue
+                    except OSError:
+                        # Vanished between poll and read: same as a hangup.
+                        unwatch(fileno)
+                        continue
+                    report = reports[fileno]
                     for event in events:
                         if event.type == ecodes.EV_SYN and event.code == ecodes.SYN_REPORT:
-                            self.process_report(report)
+                            self.process_report(report, text)
                             report.clear()
                         else:
                             report.append(event)
+
+                # Pick up mice that (re)appeared, including ones plugged in later.
+                watch(self.devices.scan())
 
                 if self.target_window and not self.target_exists():
                     LOG.info("Target window closed")
@@ -386,7 +506,7 @@ class ScrollForwarder:
             LOG.info("Stopping")
             return 0
         finally:
-            self.device.close()
+            self.devices.close_all()
             self.display.close()
 
 
@@ -398,20 +518,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.list_devices:
         return list_devices()
-    if not args.window_class or not args.device:
-        LOG.error("WINDOW_CLASS and --device are required (use --list-devices first)")
+    if not args.window_class or not (args.device or args.device_dir):
+        LOG.error("WINDOW_CLASS and --device/--device-dir are required (use --list-devices first)")
         return 2
 
     try:
+        devices = WheelDeviceSet(args.device, args.device_dir)
         if args.wait_for_device:
-            device = wait_for_wheel_device(args.device)
+            devices.wait_for_any()
         else:
-            path = validate_device_path(args.device)
-            device = open_wheel_device(path)
+            devices.scan(force=True)
+            if not devices.open_devices:
+                raise ValueError("no configured wheel device is available")
+        # Devices opened after this point rely on the udev uaccess ACL, which is
+        # how the user service runs; sudo is only for one-off discovery.
         drop_sudo_privileges()
         return ScrollForwarder(
             args.window_class,
-            device,
+            devices,
             allow_unfocused=args.allow_unfocused,
         ).run()
     except (ValueError, PermissionError, OSError, error.DisplayError) as exc:

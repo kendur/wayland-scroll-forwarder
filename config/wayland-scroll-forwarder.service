@@ -6,7 +6,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/wayland-scroll-forwarder --allow-unfocused --wait-for-device --device /dev/input/wayland-scroll-forwarder-mouse GeForceNOW
+ExecStart=%h/.local/bin/wayland-scroll-forwarder --allow-unfocused --wait-for-device --device-dir /dev/input/wsf GeForceNOW
 Restart=always
 RestartSec=3
 

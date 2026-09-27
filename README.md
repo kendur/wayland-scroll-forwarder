@@ -81,25 +81,28 @@ application is focused. Use it only for the duration of the GFN session.
 Input event numbers such as `/dev/input/event19` are not stable: they can change
 after rebooting or reconnecting a Bluetooth mouse. The included installer creates:
 
-- a udev rule matching the exact kernel device name and mouse interface
-- the stable symlink `/dev/input/wayland-scroll-forwarder-mouse`
+- a udev rule per named mouse, matching the exact kernel device name and mouse
+  interface
+- a stable symlink for each one under `/dev/input/wsf/`
 - a `uaccess` grant for the active desktop user only
 - a system one-shot service that refreshes input-device rules after udev and
   Bluetooth start during boot
-- a persistent user service that waits quietly while the mouse is absent and
-  resumes automatically after it reconnects
+- a persistent user service that monitors every mouse in `/dev/input/wsf`, waits
+  quietly while they are absent, and picks each one up again as it reconnects
 
-First identify the exact mouse name with `--list-devices`, then install. For example:
+Name every mouse you use, not just one: the forwarder follows whichever of them
+are connected, so switching mice mid-session keeps scrolling working. First
+identify the exact names with `--list-devices`, then install. For example:
 
 ```bash
 sudo ./scroll_forwarder.py --list-devices
 ./build.sh
-./install-persistent.sh "Naga V2 Pro Mouse"
+./install-persistent.sh "Naga V2 Pro Mouse" "Logitech Wireless Mouse MX Master 3"
 ```
 
 A single authentication dialog covers the udev rule, the boot-refresh service
 and the udev reload; everything else runs as the desktop user. Re-running the
-installer after a rebuild (`./install-persistent.sh`, the device name is read
+installer after a rebuild (`./install-persistent.sh`, the device names are read
 from the installed rule) shows no dialog at all when the system files are
 already correct. Check or stop the forwarder with:
 

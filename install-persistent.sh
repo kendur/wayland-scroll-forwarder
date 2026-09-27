@@ -18,9 +18,10 @@ readonly SERVICE_TARGET="${HOME}/.config/systemd/user/wayland-scroll-forwarder.s
 readonly BIN_TARGET="${HOME}/.local/bin/wayland-scroll-forwarder"
 
 usage() {
-  printf 'Usage: %s "EXACT INPUT DEVICE NAME"\n' "${0##*/}"
-  printf 'Example: %s "Naga V2 Pro Mouse"\n' "${0##*/}"
-  printf 'Omit the name to reuse the one in the installed udev rule.\n'
+  printf 'Usage: %s "EXACT INPUT DEVICE NAME" ["ANOTHER NAME" ...]\n' "${0##*/}"
+  printf 'Example: %s "Naga V2 Pro Mouse" "Logitech Wireless Mouse MX Master 3"\n' "${0##*/}"
+  printf 'Every named mouse is covered; the forwarder follows whichever ones are connected.\n'
+  printf 'Omit the names to reuse the ones in the installed udev rule.\n'
 }
 
 if [[ ${EUID} -eq 0 ]]; then
@@ -28,34 +29,38 @@ if [[ ${EUID} -eq 0 ]]; then
   exit 1
 fi
 
-if [[ $# -gt 1 ]]; then
+DEVICE_NAMES=("$@")
+if (( ${#DEVICE_NAMES[@]} == 0 )) && [[ -r ${RULE_TARGET} ]]; then
+  # Reuse every mouse already covered by the installed rule, in rule order.
+  mapfile -t DEVICE_NAMES < <(sed -n 's/.*ATTRS{name}=="\([^"]*\)".*/\1/p' "${RULE_TARGET}")
+fi
+if (( ${#DEVICE_NAMES[@]} == 0 )); then
   usage >&2
   exit 2
 fi
 
-DEVICE_NAME="${1:-}"
-if [[ -z ${DEVICE_NAME} && -r ${RULE_TARGET} ]]; then
-  DEVICE_NAME="$(sed -n 's/.*ATTRS{name}=="\([^"]*\)".*/\1/p' "${RULE_TARGET}" | head -n1)"
-fi
-if [[ -z ${DEVICE_NAME} ]]; then
-  usage >&2
-  exit 2
-fi
-readonly DEVICE_NAME
-if (( ${#DEVICE_NAME} > 127 )) || \
-  ! printf '%s\n' "${DEVICE_NAME}" | LC_ALL=C grep -Eq '^[[:alnum:]][[:alnum:] ._:+-]*$'; then
-  printf 'Device name contains unsupported characters.\n' >&2
-  exit 2
-fi
+for name in "${DEVICE_NAMES[@]}"; do
+  if (( ${#name} > 127 )) || \
+    ! printf '%s\n' "${name}" | LC_ALL=C grep -Eq '^[[:alnum:]][[:alnum:] ._:+-]*$'; then
+    printf 'Device name %q contains unsupported characters.\n' "${name}" >&2
+    exit 2
+  fi
+done
+readonly DEVICE_NAMES
 
 readonly TEMP_DIR="$(mktemp -d)"
 trap 'rm -rf -- "${TEMP_DIR}"' EXIT
 
-# The validation above excludes sed replacement metacharacters except spaces,
-# so substituting the exact kernel-reported device name is deterministic.
-sed "s/@DEVICE_NAME@/${DEVICE_NAME}/g" \
-  "${SCRIPT_DIR}/config/70-wayland-scroll-forwarder.rules.in" \
-  > "${TEMP_DIR}/70-wayland-scroll-forwarder.rules"
+# The template is a comment header plus one rule line carrying @DEVICE_NAME@;
+# emit the header once and the rule line once per mouse. The validation above
+# excludes sed replacement metacharacters except spaces, so substituting each
+# exact kernel-reported device name is deterministic.
+readonly RULE_TEMPLATE="${SCRIPT_DIR}/config/70-wayland-scroll-forwarder.rules.in"
+readonly GENERATED_RULE="${TEMP_DIR}/70-wayland-scroll-forwarder.rules"
+grep '^#' "${RULE_TEMPLATE}" > "${GENERATED_RULE}"
+for name in "${DEVICE_NAMES[@]}"; do
+  grep -v '^#' "${RULE_TEMPLATE}" | sed "s/@DEVICE_NAME@/${name}/g" >> "${GENERATED_RULE}"
+done
 
 # --- user-level files (no privileges needed) --------------------------------
 if [[ -x ${SCRIPT_DIR}/dist/wayland-scroll-forwarder ]]; then
@@ -70,7 +75,7 @@ install -Dm644 "${SCRIPT_DIR}/config/wayland-scroll-forwarder.service" "${SERVIC
 
 # --- system files: skip entirely when already correct -----------------------
 system_ok=1
-cmp -s "${TEMP_DIR}/70-wayland-scroll-forwarder.rules" "${RULE_TARGET}" 2>/dev/null || system_ok=0
+cmp -s "${GENERATED_RULE}" "${RULE_TARGET}" 2>/dev/null || system_ok=0
 cmp -s "${SCRIPT_DIR}/config/${REFRESH_SERVICE_NAME}" "${REFRESH_SERVICE_TARGET}" 2>/dev/null || system_ok=0
 systemctl is-enabled --quiet "${REFRESH_SERVICE_NAME}" 2>/dev/null || system_ok=0
 
@@ -81,7 +86,7 @@ else
   cat > "${TEMP_DIR}/root-steps.sh" <<ROOT
 #!/usr/bin/env bash
 set -euo pipefail
-install -Dm644 "${TEMP_DIR}/70-wayland-scroll-forwarder.rules" "${RULE_TARGET}"
+install -Dm644 "${GENERATED_RULE}" "${RULE_TARGET}"
 install -Dm644 "${TEMP_DIR}/${REFRESH_SERVICE_NAME}" "${REFRESH_SERVICE_TARGET}"
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=input --action=add
@@ -99,8 +104,8 @@ systemctl --user daemon-reload
 systemctl --user enable wayland-scroll-forwarder.service >/dev/null 2>&1 || true
 systemctl --user restart wayland-scroll-forwarder.service
 
-printf '\nInstalled persistent forwarder for: %s\n' "${DEVICE_NAME}"
+printf '\nInstalled persistent forwarder for: %s\n' "$(printf '%s, ' "${DEVICE_NAMES[@]}" | sed 's/, $//')"
 printf 'Binary: %s\n' "${BIN_TARGET}"
-printf 'Stable device: /dev/input/wayland-scroll-forwarder-mouse\n'
+printf 'Stable devices: /dev/input/wsf/ (one entry per connected mouse above)\n'
 printf 'Service: wayland-scroll-forwarder.service (systemctl --user status wayland-scroll-forwarder)\n'
 printf 'Boot refresh: %s\n' "${REFRESH_SERVICE_NAME}"
