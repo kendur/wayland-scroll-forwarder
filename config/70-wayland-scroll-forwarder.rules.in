@@ -2,5 +2,9 @@
 # the selected mouse interfaces and gives each one a stable name, under a single
 # directory, across reconnects. One rule line per configured mouse; the
 # forwarder monitors every entry in /dev/input/wsf, so switching between mice
-# mid-session keeps working.
-ACTION=="add", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", ATTRS{name}=="@DEVICE_NAME@", TAG+="uaccess", SYMLINK+="input/wsf/%k"
+# mid-session keeps working. The lines match every action except remove, not
+# just add: a later change/bind event on the same device (a Steam gamescope ->
+# Plasma session switch reprocesses all of /sys/class/input, for instance)
+# recomputes symlinks from the rules, and an add-only line would silently drop
+# /dev/input/wsf while the mouse stays plugged in.
+ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", ATTRS{name}=="@DEVICE_NAME@", TAG+="uaccess", SYMLINK+="input/wsf/%k"
