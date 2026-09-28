@@ -2,8 +2,10 @@
 
 This is a security-focused fork of
 [`enexam/wayland-scroll-forwarder`](https://github.com/enexam/wayland-scroll-forwarder).
-It forwards wheel events from one explicitly selected physical device only while
-an exact X11/Xwayland `WM_CLASS` is focused.
+It forwards wheel events from explicitly selected physical devices only while
+an exact X11/Xwayland `WM_CLASS` is focused. A GTK4 desktop front end
+(`scroll_forwarder_gui.py`) manages the device list, the runtime options and the
+diagnostics.
 
 ## Security changes
 
@@ -20,6 +22,77 @@ The safest configuration is to give the logged-in user read access to one stable
 mouse event device and run the forwarder without `sudo`. The sudo fallback still
 drops privileges, but opening the device through a privileged Python process has
 a larger attack surface than a device ACL.
+
+## Graphical front end
+
+```bash
+wayland-scroll-forwarder-gui     # or: ./scroll_forwarder_gui.py
+```
+
+Installed by `install-persistent.sh` together with a **Scroll Forwarder** entry
+in the desktop menu. It gives you:
+
+- **Devices** - every peripheral that could plausibly scroll, one row per
+  *interface*, with its bus, its current event node and whether it is readable
+  yet. Wheel-capable interfaces are listed first; "Show every interface" reveals
+  the rest. "Watch wheel activity" counts wheel events live, which identifies an
+  unlabelled device and proves whether one is sending anything at all.
+- **Options** - target `WM_CLASS`, the two runtime flags and autostart. These
+  are written to an environment file read by the user service, so changing them
+  needs no root and no reinstall.
+- **Diagnostics** - the chain that has to hold for scrolling to arrive: service
+  running, rule installed, udev applied it, devices readable, injection accepted
+  by Xwayland. Plus the last 200 service log lines, and a "Copy diagnostics"
+  action.
+- **Why this exists** - a plain explanation of the underlying problem and of
+  every permission the tool asks for.
+
+It needs the host's `python3-gobject` (GTK 4 and libadwaita); it is deliberately
+not bundled by PyInstaller, which would mean shipping all of GTK.
+
+### Peripherals other than mice
+
+A wheel is not always on a mouse interface. Gaming keypads (Razer Tartarus) and
+unifying receivers report theirs on an interface udev classifies as a *keyboard*,
+which `ENV{ID_INPUT_MOUSE}=="1"` can never match. Device selections therefore
+carry an interface class, on the command line as a prefix:
+
+| spec | matches |
+| --- | --- |
+| `"Naga V2 Pro Mouse"` or `mouse:...` | `ENV{ID_INPUT_MOUSE}=="1"` (default) |
+| `key:"Razer Razer Tartarus V2"` | `ENV{ID_INPUT_KEY}=="1"` |
+| `any:...` | every interface with that exact name |
+
+Granting access to a keyboard-class interface also lets programs running as you
+read what that device *types*. The GUI says so on the row and again when you
+enable one; only do it for a peripheral whose wheel you actually need.
+
+### Administrator access
+
+Only the udev rule needs root, and the GUI is built so that it asks as rarely
+and holds as little as possible:
+
+1. **The unprivileged half runs first.** Every apply starts with
+   `install-persistent.sh --privesc none`, which does the user-level work and
+   exits 3 only if the files under `/etc` genuinely differ. A rebuild, or a
+   selection that already matches the installed rule, never reaches an
+   authentication step - so no password is requested, entered or held for it.
+2. **System dialog (default).** polkit's own prompt; the password never passes
+   through this program.
+3. **Password entered in the window.** For the one case the dialog cannot
+   handle: it opens *behind* a fullscreen game, so applying appears to hang.
+   The password goes straight to `sudo` on standard input - never on a command
+   line, where any process could read it from `/proc`. It is cleared from the
+   window as soon as the command returns, and optionally kept **in memory only**
+   until the window closes, for applying several changes in a row.
+
+Writing the password to the desktop keyring was deliberately **not** built.
+While the keyring is unlocked, anything running as you can read it back, which
+is close to giving the account passwordless root; a scoped `NOPASSWD` sudoers
+entry or a permissive polkit rule has the same problem in a different place,
+since either would let any process of yours install arbitrary udev rules - root
+code execution. Device changes are rare enough that none of that is worth it.
+If an earlier build saved one, the Options page offers to delete it.
 
 ## Dependencies
 
@@ -81,8 +154,8 @@ application is focused. Use it only for the duration of the GFN session.
 Input event numbers such as `/dev/input/event19` are not stable: they can change
 after rebooting or reconnecting a Bluetooth mouse. The included installer creates:
 
-- a udev rule per named mouse, matching the exact kernel device name and mouse
-  interface
+- a udev rule per named device, matching the exact kernel device name and the
+  chosen interface class
 - a stable symlink for each one under `/dev/input/wsf/`
 - a `uaccess` grant for the active desktop user only
 - a system one-shot service that refreshes input-device rules after udev and
@@ -97,8 +170,20 @@ identify the exact names with `--list-devices`, then install. For example:
 ```bash
 sudo ./scroll_forwarder.py --list-devices
 ./build.sh
-./install-persistent.sh "Naga V2 Pro Mouse" "Logitech Wireless Mouse MX Master 3"
+./install-persistent.sh "Naga V2 Pro Mouse" "Logitech Wireless Mouse MX Master 3" \
+  "key:Razer Razer Tartarus V2"
 ```
+
+The runtime flags and the target window class live in
+`~/.config/wayland-scroll-forwarder/forwarder.env`, read by the user service:
+
+```ini
+WSF_OPTIONS=--allow-unfocused --wait-for-device
+WSF_WINDOW_CLASS=GeForceNOW
+```
+
+Changing them needs no root; `systemctl --user restart wayland-scroll-forwarder`
+applies them (the GUI does both for you).
 
 A single authentication dialog covers the udev rule, the boot-refresh service
 and the udev reload; everything else runs as the desktop user. Re-running the
@@ -137,8 +222,10 @@ Do not grant access to keyboard event devices or add the user broadly to the
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile scroll_forwarder.py
+python3 -m py_compile scroll_forwarder.py scroll_forwarder_gui.py
 ```
+
+The GUI tests are skipped automatically on a host without `python3-gobject`.
 
 ## Limitations
 

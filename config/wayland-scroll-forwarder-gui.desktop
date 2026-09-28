@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Scroll Forwarder
+GenericName=GeForce NOW scroll fix
+Comment=Choose which mice and keypads keep scrolling inside GeForce NOW
+Exec=wayland-scroll-forwarder-gui
+Icon=input-mouse
+Terminal=false
+Categories=Settings;HardwareSettings;Utility;
+Keywords=scroll;wheel;mouse;geforce;gfn;wayland;
+StartupNotify=true

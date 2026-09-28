@@ -6,7 +6,13 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/wayland-scroll-forwarder --allow-unfocused --wait-for-device --device-dir /dev/input/wsf GeForceNOW
+# Defaults; the GUI (or hand-editing) overrides them in the environment file
+# below, so changing the target window or the flags needs no root and no
+# reinstall - only the device list does.
+Environment=WSF_OPTIONS=--allow-unfocused --wait-for-device
+Environment=WSF_WINDOW_CLASS=GeForceNOW
+EnvironmentFile=-%h/.config/wayland-scroll-forwarder/forwarder.env
+ExecStart=%h/.local/bin/wayland-scroll-forwarder $WSF_OPTIONS --device-dir /dev/input/wsf $WSF_WINDOW_CLASS
 Restart=always
 RestartSec=3
 
